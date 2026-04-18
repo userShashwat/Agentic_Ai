@@ -1,5 +1,6 @@
 langgraph
 chromadb
 sentence-transformers
-google-generativeai
 streamlit
+langchain-openai
+python-dotenv
