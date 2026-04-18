@@ -1,4 +1,5 @@
-# hr_agent.py - HR Policy Bot using GitHub Models
+# hr_agent.py - HR Policy Bot with LangGraph, RAG, Memory, Eval, Tool
+# Uses GitHub Models (free) via OpenAI-compatible API
 
 import os
 from datetime import datetime
@@ -11,18 +12,16 @@ import chromadb
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 
-# Load the GITHUB_TOKEN from your .env file
+# Load GitHub token from .env file
 load_dotenv()
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 
 if not GITHUB_TOKEN:
-    raise ValueError("GITHUB_TOKEN not found. Please make sure you have a .env file with your token.")
+    raise ValueError("GITHUB_TOKEN not found. Please create a .env file with your token.")
 
 # ============================================================
 # 1. CONFIGURE GITHUB MODELS (OpenAI-Compatible)
 # ============================================================
-# The base URL is the inference endpoint for GitHub Models
-# We use gpt-4o-mini because it's fast, capable, and within free tier limits
 MODEL_NAME = "gpt-4o-mini"
 llm = ChatOpenAI(
     model=MODEL_NAME,
@@ -98,7 +97,6 @@ def create_initial_state(question: str) -> HRState:
 # 5. NODE FUNCTIONS
 # ============================================================
 def call_llm(prompt: str, temperature: float = 0.0) -> str:
-    """Helper function to call GitHub Models via LangChain"""
     response = llm.invoke(prompt)
     return response.content
 
@@ -108,13 +106,25 @@ def memory_node(state: HRState):
     if len(messages) > 6:
         messages = messages[-6:]
     user_name = state.get("user_name", "")
-    if "my name is" in state["question"].lower():
-        parts = state["question"].lower().split("my name is")
+    
+    q_lower = state["question"].lower()
+    if "my name is" in q_lower:
+        parts = q_lower.split("my name is")
         if len(parts) > 1:
             user_name = parts[1].strip().split()[0].capitalize()
+    elif "call me" in q_lower:
+        parts = q_lower.split("call me")
+        if len(parts) > 1:
+            user_name = parts[1].strip().split()[0].capitalize()
+    
     return {"messages": messages, "user_name": user_name}
 
 def router_node(state: HRState):
+    q_lower = state["question"].lower()
+    # Memory-only questions – skip retrieval
+    if any(phrase in q_lower for phrase in ["what is my name", "my name is", "call me", "who am i"]):
+        return {"route": "skip"}
+    
     prompt = f"""You are a router for an HR policy bot. Decide:
 - 'retrieve' if the question asks about company policies, leaves, salary, holidays, insurance, etc.
 - 'tool' if it asks for current date, time, or calculation.
@@ -147,6 +157,16 @@ def tool_node(state: HRState):
         return {"tool_result": "Tool could not answer. Please ask HR directly."}
 
 def answer_node(state: HRState):
+    user_name = state.get("user_name", "")
+    q_lower = state["question"].lower()
+    
+    # Direct answer for name query
+    if "what is my name" in q_lower or "who am i" in q_lower:
+        if user_name:
+            return {"answer": f"Your name is {user_name}."}
+        else:
+            return {"answer": "I don't know your name yet. Please tell me: 'My name is ...'"}
+    
     system = """You are an HR policy assistant. Answer ONLY using the provided context.
 If the context does NOT contain the answer, say: "I don't know. Please call HR helpline 1800-123-4567."
 Never invent policies or numbers. Be helpful but concise."""
@@ -158,7 +178,10 @@ Never invent policies or numbers. Be helpful but concise."""
     else:
         context = "No context provided."
     
-    user_name = state.get("user_name", "")
+    # If user just stated their name, acknowledge it directly
+    if user_name and ("my name is" in q_lower or "call me" in q_lower):
+        return {"answer": f"Nice to meet you, {user_name}! How can I help you with HR policies today?"}
+    
     greeting = f"User name is {user_name}. " if user_name else ""
     
     full_prompt = f"{system}\n\n{greeting}Context:\n{context}\n\nQuestion: {state['question']}\nAnswer:"
